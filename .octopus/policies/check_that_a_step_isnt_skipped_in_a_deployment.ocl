@@ -1,0 +1,23 @@
+name = "Check that a step isn’t skipped in a deployment"
+violation_action = "warn"
+
+conditions {
+    rego = <<-EOT
+            package check_that_a_step_isnt_skipped_in_a_deployment
+            
+            default result := {"allowed": false}
+            
+            # Check all steps are not skipped
+            result := {"allowed": true} if {
+                count(input.SkippedSteps) == 0
+            }
+            EOT
+}
+
+scope {
+    rego = <<-EOT
+            package check_that_a_step_isnt_skipped_in_a_deployment
+            
+            default evaluate := true
+            EOT
+}

@@ -1,0 +1,38 @@
+name = "Check that a release version is greater than required minimum"
+violation_action = "warn"
+
+conditions {
+    rego = <<-EOT
+            package check_that_a_release_version_is_greater_than_required_minimum
+            
+            result := {"allowed": false, "action": "block"} if {
+                production
+                version_less_than_required
+            }
+            
+            result := {"allowed": false} if {
+                not production
+                version_less_than_required
+            }
+            
+            result := {"allowed": true} if {
+                not version_less_than_required
+            }
+            
+            production if {
+                startswith(input.Environment.Slug, "prod")
+            }
+            
+            version_less_than_required if {
+                semver.compare(input.Release.Version, "1.0.0") < 0
+            }
+            EOT
+}
+
+scope {
+    rego = <<-EOT
+            package check_that_a_release_version_is_greater_than_required_minimum
+            
+            default evaluate := true
+            EOT
+}

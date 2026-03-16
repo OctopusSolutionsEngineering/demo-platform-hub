@@ -1,0 +1,281 @@
+name = "IIS - Restart Web Site"
+description = <<-EOT
+        This process template restarts an IIS site and notifies a team.
+        <br /><br />
+        Logs are gathered from the site being restarted.
+        <br /><br />
+        This template is meant to be used in a **Runbook**.
+        EOT
+
+icon {
+    color = "#00874D"
+    id = "recycle"
+}
+
+parameter "Template.Worker.Pool" {
+    display_settings = {
+        Octopus.ControlType = "WorkerPool"
+    }
+    help_text = ""
+    label = "Worker Pool"
+}
+
+parameter "Template.Target.Tags" {
+    display_settings = {
+        Octopus.ControlType = "TargetTags"
+    }
+    help_text = ""
+    label = "Target Tags"
+}
+
+parameter "Template.Site.Name" {
+    display_settings = {
+        Octopus.ControlType = "SingleLineText"
+    }
+    help_text = ""
+    label = "Site Name"
+}
+
+parameter "Template.Site.Url" {
+    display_settings = {
+        Octopus.ControlType = "SingleLineText"
+    }
+    help_text = ""
+    label = "Site Url"
+}
+
+parameter "Template.Notification.Teams" {
+    display_settings = {
+        Octopus.ControlType = "Teams"
+    }
+    help_text = ""
+    label = "Teams to Notify"
+}
+
+step "inspect-site" {
+    name = "🔍 Inspect site"
+    properties = {
+        Octopus.Action.TargetRoles = "#{Template.Target.Tags}"
+    }
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.RunOnServer = "false"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                $URI = $OctopusParameters["Template.Site.Url"]
+                
+                Write-Host "Making request to $URI"
+                try
+                {
+                    $response = Invoke-WebRequest -Uri $URI -UseBasicParsing
+                    $statusCode = $response.StatusCode
+                } catch {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                }
+                
+                Write-Host "The result of the request was $statusCode"
+                
+                Set-OctopusVariable -name "WebSiteBroken" -value ($statusCode -ne 200)
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = ""
+    }
+}
+
+step "collect-logs" {
+    name = "📁 Collect logs"
+    properties = {
+        Octopus.Action.TargetRoles = "#{Template.Target.Tags}"
+    }
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.RunOnServer = "false"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                $targetName = $OctopusParameters["Octopus.Machine.Name"]
+                $path = "$($targetName)-web-logs"
+                
+                New-Item -Path $path -ItemType Directory
+                
+                $files = Get-ChildItem "C:\\inetpub\logs\LogFiles\W3SVC1"
+                $files = $files | Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-2) }
+                
+                $files | ForEach-Object {
+                	Write-Host "Copying $($_.FullName)"
+                    Copy-Item $_.FullName -Destination $path
+                }
+                
+                $options = @{
+                  Path = "$path\*.log"
+                  CompressionLevel = "Fastest"
+                  DestinationPath = "$path.zip"
+                }
+                
+                Compress-Archive @options
+                
+                New-OctopusArtifact "$path.zip"
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = ""
+    }
+}
+
+step "analyze-state" {
+    name = "🔬 Analyze state"
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.RunOnServer = "true"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                $machines = @()
+                
+                #{each machine in Octopus.Action[🔍 Inspect site].Output}
+                 $machines += "#{machine}"
+                #{/each}
+                
+                $machines = $machines | Sort-Object
+                
+                $allBroken = $true
+                $details = @()
+                
+                $machines | ForEach-Object {
+                  $webSiteBroken = $OctopusParameters["Octopus.ProcessTemplate.Action[🔍 Inspect site].Output[$_].WebSiteBroken"]
+                  
+                  Write-Host "Checking $_"
+                  
+                  $webSiteBroken = ($webSiteBroken -eq "True")
+                  $allBroken = $allBroken -and $webSiteBroken
+                
+                  $state = "* Request to $_ was successful."
+                  if ($webSiteBroken) {
+                  	$state = "* Request to $_ was **unsuccessful**."
+                  }
+                  $details += $state
+                }
+                
+                $createdBy = $OctopusParameters["Octopus.Deployment.CreatedBy.Id"]
+                $manualRun = ($createdBy -ne 'users-system')
+                
+                Set-OctopusVariable -name "ManualRun" -value $manualRun
+                Set-OctopusVariable -name "NeedsConfirmation" -value (-not $allBroken -and $manualRun)
+                
+                $details = $details -join "`r`n" | Out-String
+                
+                Set-OctopusVariable -name "Details" -value $details
+                
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = "#{Template.Worker.Pool}"
+    }
+}
+
+step "rectify" {
+    name = "🔨 Rectify"
+    properties = {
+        Octopus.Action.MaxParallelism = "1"
+        Octopus.Action.TargetRoles = "#{Template.Target.Tags}"
+    }
+
+    action "restart-site" {
+        action_type = "Octopus.Script"
+        name = "♻️ Restart site"
+        properties = {
+            Octopus.Action.RunOnServer = "false"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                # Load IIS module:
+                Import-Module WebAdministration
+                
+                $name = $OctopusParameters['Template.Site.Name']
+                $site = Get-Item "IIS:\Sites\$name"
+                
+                Write-Output "Stopping IIS web site $name"
+                $site.Stop()
+                Write-Output "Starting IIS web site $name"
+                $site.Start()
+                
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = ""
+    }
+
+    action "verify-site" {
+        action_type = "Octopus.Script"
+        name = "🔍 Verify site"
+        properties = {
+            Octopus.Action.RunOnServer = "false"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                $URI = $OctopusParameters["Template.Site.Url"]
+                
+                for ($x = 0; $x -lt 30; ++$x)
+                {
+                  try
+                  {
+                    Write-Host "Making request to $URI"
+                    $response = Invoke-WebRequest -Uri $URI -UseBasicParsing
+                    $statusCode = $response.StatusCode
+                  } catch {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                  }
+                  
+                  if ($statusCode -eq 200) {
+                  	Write-Host "Request to $URI was successful"
+                    exit 0
+                  }
+                  
+                  Write-Host "Request to $URI was unsuccessful, trying again in 10 seconds..."
+                  Start-Sleep 10
+                }
+                
+                
+                Fail-Step "Failed to make a successful request to $URI"
+                
+                
+                & C:\Program Files\OctopusDeploy\Tentacle\tentacle.exe service --restart
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = ""
+    }
+}
+
+step "notify-stakeholders" {
+    name = "📨 Notify stakeholders"
+
+    action {
+        action_type = "Octopus.Email"
+        properties = {
+            Octopus.Action.Email.Body = <<-EOT
+                #{Octopus.Deployment.CreatedBy.DisplayName} initiated the Restart Web Site runbook in #{Octopus.Environment.Name}.
+                <br><br>
+                The results of the web site check(s) were:
+                <br><br>
+                #{Octopus.ProcessTemplate.Action[🔬 Analyze state].Output.Details | Markdown}
+                <br><br>
+                The web site(s) were restarted and returned successful status codes.
+                <br><br>
+                View the Runbook logs at #{Octopus.Web.ServerUri}#{Octopus.Web.RunbookRunLink}
+                EOT
+            Octopus.Action.Email.IsHtml = "True"
+            Octopus.Action.Email.Priority = "High"
+            Octopus.Action.Email.Subject = "#{Octopus.Environment.Name} #{Template.Site.Name} site restarted"
+            Octopus.Action.Email.ToTeamIds = "#{Template.Notification.Teams}"
+        }
+    }
+}

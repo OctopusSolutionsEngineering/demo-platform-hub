@@ -1,0 +1,38 @@
+name = "Check for a valid version of the verify attestation template"
+violation_action = "block"
+violation_reason = "Out of date template in use"
+
+conditions {
+    rego = <<-EOT
+            package check_for_a_valid_version_of_the_verify_attestation_template
+
+            default result := {"allowed": false}
+            
+            result := {"allowed": true} if {
+                count(process_template_steps) > 0
+            
+                every step in process_template_steps {
+                    semver.compare(step.Source.Version, "2.0.0") >= 0
+                }
+            }
+            
+            process_template_steps := [step |
+                some step in input.Steps
+                step.Source.Type == "Process Template"
+                startswith(step.Source.SlugOrId, "github-verify-attestations")
+            ]
+            EOT
+}
+
+scope {
+    rego = <<-EOT
+            package check_for_a_valid_version_of_the_verify_attestation_template
+            
+            default evaluate := false
+            
+            evaluate := true if { 
+                startswith(input.ProjectGroup.Slug, "compliant-")
+                not input.Runbook
+            }
+            EOT
+}

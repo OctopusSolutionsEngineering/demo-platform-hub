@@ -1,0 +1,24 @@
+name = "Check that all deployment steps are enabled"
+violation_action = "block"
+
+conditions {
+    rego = <<-EOT
+            package check_that_all_deployment_steps_are_enabled
+            
+            default result := {"allowed": true}
+            
+            # Check if any steps are disabled
+            result := {"allowed": false} if {
+                some step in input.Steps
+                step.Enabled == false
+            }
+            EOT
+}
+
+scope {
+    rego = <<-EOT
+            package check_that_all_deployment_steps_are_enabled
+            
+            default evaluate := true
+            EOT
+}

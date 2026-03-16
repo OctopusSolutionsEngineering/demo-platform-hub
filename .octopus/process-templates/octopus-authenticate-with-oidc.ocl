@@ -1,0 +1,135 @@
+name = "Octopus - Authenticate with OIDC"
+description = <<-EOT
+        This step uses Octopus an [OpenID Connect](https://octopus.com/docs/infrastructure/accounts/openid-connect) Account to obtain an access token that can be used in place of an API key in requests against the Octopus API.
+        <br /><br />
+        The access token is stored in an [Output Variable](https://octopus.com/docs/projects/variables/output-variables) named **AccessToken**."
+        EOT
+
+icon {
+    color = "#1A77CA"
+    id = "octopus-deploy"
+}
+
+parameter "Template.Octopus.AuthenticateWithOIDC.WorkerPool" {
+    display_settings = {
+        Octopus.ControlType = "WorkerPool"
+    }
+    help_text = "The worker pool on which to run the step."
+    label = "Worker Pool"
+}
+
+parameter "Template.Octopus.AuthenticateWithOIDC.ServerUri" {
+    display_settings = {
+        Octopus.ControlType = "SingleLineText"
+    }
+    help_text = "The URI of the Octopus Server with which to authenticate."
+    label = "Octopus Server Uri"
+
+    value "#{Octopus.Web.ServerUri}" {}
+}
+
+parameter "Template.Octopus.AuthenticateWithOIDC.OidcAccount" {
+    display_settings = {
+        Octopus.ControlType = "GenericOidcAccount"
+    }
+    help_text = "The Generic OIDC Account variable used to authenticate with the Octopus Server."
+    label = "OIDC Account"
+}
+
+step "verify-configuration" {
+    name = "Verify configuration"
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.RunOnServer = "true"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                if ([string]::IsNullOrWhiteSpace($OctopusParameters["Template.Octopus.AuthenticateWithOIDC.ServerUri"])) {
+                  Fail-Step "Octopus Server Uri is required."
+                }
+                
+                if ([string]::IsNullOrWhiteSpace($OctopusParameters["Template.Octopus.AuthenticateWithOIDC.OidcAccount"])) {
+                  Fail-Step "OIDC Account is required."
+                }
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = "#{Template.Octopus.AuthenticateWithOIDC.WorkerPool}"
+    }
+}
+
+step "authenticate-with-oidc" {
+    name = "Authenticate with OIDC"
+
+    action {
+        action_type = "Octopus.Script"
+        properties = {
+            Octopus.Action.RunOnServer = "true"
+            Octopus.Action.Script.ScriptBody = <<-EOT
+                function Invoke-OctopusApi {
+                  param(
+                    $Uri,
+                    $Method,
+                    $Body
+                  )
+                
+                  try {
+                    Write-Verbose "Making request to $Uri"
+                
+                    if ($null -eq $Body)
+                    {
+                      Write-Verbose "No body to send in the request"
+                      return Invoke-RestMethod -Method $method -Uri $Uri -ContentType "application/json; charset=utf-8"
+                    } 
+                
+                  $Body = $Body | ConvertTo-Json -Depth 10
+                  Write-Verbose $Body
+                  
+                    return Invoke-RestMethod -Uri $Uri -Method $Method -Body $Body -ContentType "application/json; charset=utf-8" -ErrorAction Stop
+                  }
+                  catch {
+                    Write-Host "Request failed with message `"$($_.Exception.Message)`""
+                
+                    if ($_.Exception.Response) {
+                        $code = $_.Exception.Response.StatusCode.value__
+                        $message = $_.Exception.Message
+                        Write-Host "HTTP response code: $code"
+                
+                        Write-Host "Server returned: $error"
+                      }
+                
+                    Fail-Step "Failed to make $method request to $uri"
+                  }
+                }
+                
+                $server = $OctopusParameters["Template.Octopus.AuthenticateWithOIDC.ServerUri"]
+                $accountVariableName = $OctopusParameters["Template.Octopus.AuthenticateWithOIDC.OidcAccount"]
+                
+                $serviceAccountId = $OctopusParameters["$($accountVariableName).Audience"]
+                $jwt = $OctopusParameters["$($accountVariableName).OpenIdConnect.Jwt"]
+                
+                $body = @{
+                  grant_type = "urn:ietf:params:oauth:grant-type:token-exchange";
+                  audience = "$serviceAccountId";
+                  subject_token_type = "urn:ietf:params:oauth:token-type:jwt";
+                  subject_token = "$jwt"
+                }
+                
+                $uri = "$server/.well-known/openid-configuration"
+                $response = Invoke-OctopusApi -Uri $uri -Method "GET"
+                $response = Invoke-OctopusApi -Uri $response.token_endpoint -Method "POST" -Body $body
+                
+                Set-OctopusVariable -name "AccessToken" -value $response.access_token -sensitive
+                
+                $stepName = $OctopusParameters["Octopus.Step.Name"]
+                Write-Host "Created output variable: ##{Octopus.Action[$stepName].Output.AccessToken}"
+                EOT
+            Octopus.Action.Script.ScriptSource = "Inline"
+            Octopus.Action.Script.Syntax = "PowerShell"
+            OctopusUseBundledTooling = "False"
+        }
+        worker_pool_variable = "#{Template.Octopus.AuthenticateWithOIDC.WorkerPool}"
+    }
+}
